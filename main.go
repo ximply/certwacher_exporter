@@ -1,28 +1,58 @@
 package main
 
 import (
-	"flag"
-	"net"
-	"os"
-	"net/http"
-	"strings"
-	"io"
-	"time"
-	"fmt"
 	"crypto/tls"
+	"flag"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"strings"
+	"sync"
+	"time"
 )
 
 var (
 	Name           = "cert_exporter"
 	listenAddress  = flag.String("unix-sock", "/dev/shm/cert_exporter.sock", "Address to listen on for unix sock access and telemetry.")
 	metricsPath    = flag.String("web.telemetry-path", "/metrics", "Path under which to expose metrics.")
-	website        = flag.String("web.site", "", "Destination https website(www.xxx.com:443).")
+	website        = flag.String("web.site", "", "Destination https website(www.xxx.com:443,www.yyy.com:443).")
 )
 
-var g_host string
-var g_port string
+type WebSite struct {
+	Host string
+	Port string
+}
 
-func check(host, port string) (int, error) {
+type Remain struct {
+	Ws WebSite
+	Secs float64
+	Err error
+}
+
+var gWebSites map[string]WebSite
+
+func check(ws WebSite, wg *sync.WaitGroup, ch *chan Remain) {
+	r := Remain{}
+	r.Ws.Host = ws.Host
+	r.Ws.Port = ws.Port
+
+	sec, err := checkImpl(r.Ws.Host, r.Ws.Port)
+	if err != nil {
+		r.Err = err
+		*ch <- r
+		wg.Done()
+		return
+	}
+
+	r.Secs = float64(sec)
+	r.Err = nil
+	*ch <- r
+	wg.Done()
+}
+
+func checkImpl(host, port string) (int, error) {
 	dialer := &net.Dialer{Timeout: 3 * time.Second}
 	conn, err := tls.DialWithDialer(dialer, "tcp", host + ":" + port, &tls.Config{
 		InsecureSkipVerify: true,
@@ -53,15 +83,25 @@ func check(host, port string) (int, error) {
 }
 
 func metrics(w http.ResponseWriter, r *http.Request) {
-	sec, err := check(g_host, g_port)
-	if err == nil {
-		io.WriteString(w,
-			fmt.Sprintf("https_cert_remaining_seconds{domain=\"%s\",port=\"%s\"} %g",
-				g_host, g_port, float64(sec)))
-	} else {
-		io.WriteString(w, "")
+	wg := sync.WaitGroup{}
+	ch := make(chan Remain, len(gWebSites))
+	for _, v := range gWebSites {
+		wg.Add(1)
+		go check(v, &wg, &ch)
 	}
+	wg.Wait()
+	close(ch)
 
+	ret := ""
+
+	for i := range ch {
+		if i.Err == nil {
+			ret += fmt.Sprintf("https_cert_remaining_seconds{domain=\"%s\",port=\"%s\"} %g\n",
+				i.Ws.Host, i.Ws.Port, i.Secs)
+		}
+	}
+	ret = strings.TrimRight(ret, "\n")
+	io.WriteString(w, ret)
 }
 
 func main() {
@@ -76,12 +116,23 @@ func main() {
 		panic("no website")
 	}
 
-	l := strings.Split(*website, ":")
-	if len(l) != 2 {
-		panic("error website")
+	l := strings.Split(*website, ",")
+	gWebSites = make(map[string]WebSite)
+	for _, v := range l {
+		s := strings.Split(v, ":")
+		if len(s) != 2 {
+			continue
+		}
+
+		gWebSites[v] = WebSite{
+			Host:s[0],
+			Port:s[1],
+		}
 	}
-	g_host = l[0]
-	g_port = l[1]
+
+	if len(gWebSites) < 1 {
+		panic("no websites")
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc(*metricsPath, metrics)
