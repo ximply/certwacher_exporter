@@ -83,23 +83,31 @@ func checkImpl(host, port string) (int, error) {
 }
 
 func metrics(w http.ResponseWriter, r *http.Request) {
-	wg := sync.WaitGroup{}
+	/*wg := sync.WaitGroup{}
 	ch := make(chan Remain, len(gWebSites))
 	for _, v := range gWebSites {
 		wg.Add(1)
 		go check(v, &wg, &ch)
 	}
 	wg.Wait()
-	close(ch)
+	close(ch)*/
 
 	ret := ""
 
-	for i := range ch {
+	for _, v := range gWebSites {
+		sec, err := checkImpl(v.Host, v.Port)
+		if err == nil {
+			ret += fmt.Sprintf("https_cert_remaining_seconds{domain=\"%s\",port=\"%s\"} %g\n",
+				v.Host, v.Port, sec)
+		}
+	}
+
+	/*for i := range ch {
 		if i.Err == nil {
 			ret += fmt.Sprintf("https_cert_remaining_seconds{domain=\"%s\",port=\"%s\"} %g\n",
 				i.Ws.Host, i.Ws.Port, i.Secs)
 		}
-	}
+	}*/
 	ret = strings.TrimRight(ret, "\n")
 	io.WriteString(w, ret)
 }
